@@ -1,0 +1,27 @@
+name: bouh_gold_pro_ultra
+description: BOUH GOLD PRO ULTRA v12.5 - Arabic Geospatial Mining Intelligence App.
+publish_to: "none"
+
+version: 12.5.0+1250
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  geolocator: ^13.0.1
+  path_provider: ^2.1.4
+  share_plus: ^10.0.2
+  http: ^1.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

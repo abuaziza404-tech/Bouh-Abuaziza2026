@@ -260,6 +260,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
 
       - name: Install and repair web dependencies
+      - name: Install and repair web dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -272,10 +273,12 @@ jobs:
           npm --version
 
           echo "Cleaning broken install state..."
-          rm -rf node_modules
+          rm -rf node_modules package-lock.json
 
-          echo "Installing package dependencies..."
-          npm install --include=dev --legacy-peer-deps --no-audit --no-fund
+          echo "Creating safe npm config..."
+          npm config set fund false
+          npm config set audit false
+          npm config set legacy-peer-deps true
 
           echo "Installing exact required build/runtime dependencies..."
           npm install --include=dev --legacy-peer-deps --no-audit --no-fund \
@@ -289,6 +292,9 @@ jobs:
             vitest@2.1.8 \
             jsdom@25.0.1 \
             @playwright/test@1.49.1 \
+            postcss@8.4.49 \
+            autoprefixer@10.4.20 \
+            postcss-safe-parser@7.0.1 \
             @capacitor/core@6.2.0 \
             @capacitor/cli@6.2.0 \
             @capacitor/android@6.2.0 \
@@ -307,15 +313,24 @@ jobs:
           /// <reference types="vite/client" />
           EOF
 
+          cat > postcss.config.cjs <<'EOF'
+          module.exports = {
+            plugins: {
+              autoprefixer: {}
+            }
+          };
+          EOF
+
           echo "Verifying local dependencies..."
           test -f node_modules/vite/bin/vite.js
+          test -f node_modules/postcss/lib/postcss.js
           test -d node_modules/react
           test -d node_modules/react-dom
           test -d node_modules/@capacitor/core
+          test -d node_modules/maplibre-gl
 
           echo "Installed dependency check:"
-          npm ls react react-dom @types/react vite @capacitor/core @capacitor/geolocation @capacitor/preferences || true
-
+          npm ls react react-dom @types/react vite postcss autoprefixer @capacitor/core maplibre-gl || true
       - name: Build web with Vite only
         shell: bash
         run: |

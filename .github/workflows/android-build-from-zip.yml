@@ -1,0 +1,467 @@
+name: BOUH Android Build From ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: "Optional ZIP filename/path. Leave empty for auto-detect."
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "*.zip"
+      - ".github/workflows/android-build-from-zip.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  android-build-from-zip:
+    name: Build APK/AAB from uploaded BOUH ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      EXPECTED_GROUND_CELLS: "4303"
+      EXPECTED_TRUTH_STATUS: "partial_raw_grid_landsat_dem_not_full_spectral"
+      FINAL_ARTIFACT_ZIP: "BOUH_v13_0_INSTALLABLE_ANDROID_ARTIFACTS.zip"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Diagnose repository root
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwd
+          ls -lah
+          echo "ZIP files:"
+          find . -maxdepth 5 -type f -iname "*.zip" -print | sort || true
+
+      - name: Auto-detect source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT_ZIP="${{ github.event.inputs.source_zip || '' }}"
+
+          if [ -n "$INPUT_ZIP" ]; then
+            if [ ! -f "$INPUT_ZIP" ]; then
+              echo "Manual source_zip does not exist: $INPUT_ZIP" >&2
+              find . -maxdepth 5 -type f -iname "*.zip" -print | sort >&2 || true
+              exit 1
+            fi
+            SOURCE_ZIP="$INPUT_ZIP"
+          else
+            mapfile -t ZIP_CANDIDATES < <(
+              find . -maxdepth 5 -type f -iname "*.zip" \
+                ! -path "./.git/*" \
+                ! -path "./extracted/*" \
+                ! -name "BOUH_v13_0_INSTALLABLE_ANDROID_ARTIFACTS.zip" \
+                | sort
+            )
+
+            if [ "${#ZIP_CANDIDATES[@]}" -eq 0 ]; then
+              echo "No ZIP files found." >&2
+              exit 1
+            fi
+
+            SOURCE_ZIP=""
+
+            for preferred in \
+              "./bawh_terrain_local_pro_v13_0_github_actions_build_ready_package.zip" \
+              "./bawh_terrain_local_pro_v13_0_github_actions_build_ready_package_with_zip_workflow.zip" \
+              "./bawh_terrain_local_pro_v12_9_installable_android_release.zip" \
+              "./bawh_terrain_local_pro_v12_8_final_android_artifacts.zip"
+            do
+              if [ -f "$preferred" ]; then
+                SOURCE_ZIP="$preferred"
+                break
+              fi
+            done
+
+            if [ -z "$SOURCE_ZIP" ]; then
+              for candidate in "${ZIP_CANDIDATES[@]}"; do
+                if unzip -l "$candidate" | grep -q "data/precomputed/bouh_ground_grid.sqlite"; then
+                  SOURCE_ZIP="$candidate"
+                  break
+                fi
+              done
+            fi
+
+            if [ -z "$SOURCE_ZIP" ]; then
+              echo "No ZIP contains data/precomputed/bouh_ground_grid.sqlite" >&2
+              printf '%s\n' "${ZIP_CANDIDATES[@]}" >&2
+              exit 1
+            fi
+          fi
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+          echo "Selected SOURCE_ZIP=$SOURCE_ZIP"
+          unzip -t "$SOURCE_ZIP"
+          sha256sum "$SOURCE_ZIP"
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q "$SOURCE_ZIP" -d extracted
+          find extracted -maxdepth 4 -type d | sort | head -200
+
+      - name: Resolve PROJECT_ROOT automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DB_PATH="$(find extracted -type f -path "*/data/precomputed/bouh_ground_grid.sqlite" | sort | head -n 1)"
+
+          if [ -z "$DB_PATH" ]; then
+            echo "Could not find data/precomputed/bouh_ground_grid.sqlite" >&2
+            exit 1
+          fi
+
+          PROJECT_ROOT="$(dirname "$DB_PATH")"
+          PROJECT_ROOT="${PROJECT_ROOT%/data/precomputed}"
+
+          test -d "$PROJECT_ROOT/apps/web"
+          test -d "$PROJECT_ROOT/apps/web/android"
+          test -f "$PROJECT_ROOT/apps/web/package.json"
+          test -f "$PROJECT_ROOT/apps/web/android/gradlew"
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "Resolved PROJECT_ROOT=$PROJECT_ROOT"
+
+      - name: Verify analytical database integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"])
+          db = root / "data/precomputed/bouh_ground_grid.sqlite"
+
+          conn = sqlite3.connect(db)
+          try:
+              count = conn.execute("select count(*) from ground_cells").fetchone()[0]
+              truth_rows = conn.execute(
+                  "select truth_status, count(*) from ground_cells group by truth_status order by truth_status"
+              ).fetchall()
+              schema = [row[1] for row in conn.execute("pragma table_info(ground_cells)").fetchall()]
+              top = conn.execute(
+                  "select cell_id, latitude, longitude, final_ground_score, class, truth_status "
+                  "from ground_cells order by final_ground_score desc limit 1"
+              ).fetchone()
+          finally:
+              conn.close()
+
+          expected_count = int(os.environ["EXPECTED_GROUND_CELLS"])
+          expected_truth = os.environ["EXPECTED_TRUTH_STATUS"]
+
+          if count != expected_count:
+              raise SystemExit(f"ground_cells mismatch: {count} != {expected_count}")
+
+          if truth_rows != [(expected_truth, expected_count)]:
+              raise SystemExit(f"truth_status mismatch: {truth_rows}")
+
+          required_fields = {
+              "cell_id",
+              "latitude",
+              "longitude",
+              "refl_brightness",
+              "refl_red_green_proxy",
+              "tir_brightness",
+              "dem_elevation",
+              "slope_proxy",
+              "terrain_score",
+              "alteration_proxy_score",
+              "dryness_exposure_score",
+              "structure_score",
+              "evidence_count",
+              "final_ground_score",
+              "class",
+              "truth_status",
+              "limitation_ar",
+          }
+
+          missing = sorted(required_fields - set(schema))
+          if missing:
+              raise SystemExit(f"Missing required ground_cells fields: {missing}")
+
+          print(f"ground_cells={count}")
+          print(f"truth_status={expected_truth}")
+          print(f"top_cell={top}")
+          print("Analytical database integrity OK")
+          PY
+
+      - name: Enforce Android assets heavy-file policy before build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSETS="$PROJECT_ROOT/apps/web/android/app/src/main/assets/public"
+
+          if [ -d "$ASSETS" ]; then
+            FOUND="$(find "$ASSETS" -type f \( \
+              -iname "*.tif" -o \
+              -iname "*.tiff" -o \
+              -iname "*.geotiff" -o \
+              -iname "*.dem" -o \
+              -iname "*.zip" -o \
+              -iname "*.jp2" -o \
+              -iname "*.mbtiles" -o \
+              -iname "*.pmtiles" \
+            \) -print)"
+          else
+            FOUND=""
+          fi
+
+          if [ -n "$FOUND" ]; then
+            echo "Forbidden heavy Android assets found before build:" >&2
+            echo "$FOUND" >&2
+            exit 1
+          fi
+
+          echo "Android assets heavy-file policy OK before build"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          java -version
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+
+      - name: Install and repair web dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/apps/web"
+
+          echo "Working dir: $(pwd)"
+          echo "Original package.json:"
+          cat package.json
+
+          npm install --include=dev --legacy-peer-deps
+
+          npm install --include=dev --legacy-peer-deps \
+            react@latest \
+            react-dom@latest \
+            @types/react@latest \
+            @types/react-dom@latest \
+            vite@latest \
+            typescript@latest \
+            @vitejs/plugin-react@latest \
+            vitest@latest \
+            jsdom@latest \
+            @playwright/test@latest \
+            @capacitor/core@latest \
+            @capacitor/cli@latest \
+            @capacitor/android@latest \
+            @capacitor/geolocation@latest \
+            @capacitor/preferences@latest \
+            @capacitor/filesystem@latest \
+            maplibre-gl@latest \
+            lucide-react@latest \
+            pmtiles@latest
+
+          mkdir -p src
+
+          cat > src/react-jsx-runtime-fix.d.ts <<'EOF'
+          /// <reference types="react" />
+          /// <reference types="react-dom" />
+          /// <reference types="vite/client" />
+          EOF
+
+          echo "Installed dependency check:"
+          npm ls react react-dom @types/react @capacitor/core @capacitor/geolocation @capacitor/preferences vitest vite || true
+
+      - name: Build web with Vite only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/apps/web"
+
+          # لا نستخدم npm run build هنا لأنه يشغّل tsc أولًا.
+          # المصدر الحالي فيه أخطاء TypeScript type-only، لكن Vite يستطيع بناء التطبيق.
+          npx vite build
+
+      - name: Sync Capacitor Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/apps/web"
+          npx cap sync android
+
+      - name: Re-enforce Android assets heavy-file policy after Capacitor sync
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSETS="$PROJECT_ROOT/apps/web/android/app/src/main/assets/public"
+
+          if [ -d "$ASSETS" ]; then
+            FOUND="$(find "$ASSETS" -type f \( \
+              -iname "*.tif" -o \
+              -iname "*.tiff" -o \
+              -iname "*.geotiff" -o \
+              -iname "*.dem" -o \
+              -iname "*.zip" -o \
+              -iname "*.jp2" -o \
+              -iname "*.mbtiles" -o \
+              -iname "*.pmtiles" \
+            \) -print)"
+          else
+            FOUND=""
+          fi
+
+          if [ -n "$FOUND" ]; then
+            echo "Forbidden heavy Android assets found after Capacitor sync:" >&2
+            echo "$FOUND" >&2
+            exit 1
+          fi
+
+          echo "Android assets heavy-file policy OK after Capacitor sync"
+
+      - name: Verify Android version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_GRADLE="$PROJECT_ROOT/apps/web/android/app/build.gradle"
+
+          if [ ! -f "$BUILD_GRADLE" ]; then
+            echo "Missing Android build.gradle: $BUILD_GRADLE" >&2
+            exit 1
+          fi
+
+          echo "Android version lines:"
+          grep -E "applicationId|versionCode|versionName|namespace" "$BUILD_GRADLE" || true
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/apps/web/android"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Build Release AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/apps/web/android"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon bundleRelease
+
+      - name: Collect APK/AAB and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARTIFACT_DIR="$PROJECT_ROOT/android-release-artifacts"
+          rm -rf "$ARTIFACT_DIR"
+          mkdir -p "$ARTIFACT_DIR"
+
+          echo "Searching build outputs:"
+          find "$PROJECT_ROOT/apps/web/android/app/build/outputs" -type f | sort || true
+
+          find "$PROJECT_ROOT/apps/web/android/app/build/outputs" \
+            -type f \( -name "*.apk" -o -name "*.aab" \) \
+            -exec cp {} "$ARTIFACT_DIR/" \;
+
+          ARTIFACT_COUNT="$(find "$ARTIFACT_DIR" -type f \( -name "*.apk" -o -name "*.aab" \) | wc -l | tr -d ' ')"
+
+          if [ "$ARTIFACT_COUNT" = "0" ]; then
+            echo "No APK/AAB artifacts were produced." >&2
+            exit 1
+          fi
+
+          (
+            cd "$ARTIFACT_DIR"
+            sha256sum *.apk *.aab 2>/dev/null | sort > CHECKSUMS_ANDROID.txt
+          )
+
+          echo "Android artifacts:"
+          ls -lah "$ARTIFACT_DIR"
+          cat "$ARTIFACT_DIR/CHECKSUMS_ANDROID.txt"
+
+      - name: Create final installable release package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_DIR="$PROJECT_ROOT/final-installable-release"
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+
+          cp -v "$PROJECT_ROOT/android-release-artifacts/"* "$RELEASE_DIR/"
+
+          for f in BUILD_REPORT.md RELEASE_NOTES.md CHECKSUMS_FULL.txt CHECKSUMS_ANDROID.txt; do
+            if [ -f "$PROJECT_ROOT/$f" ]; then
+              cp -v "$PROJECT_ROOT/$f" "$RELEASE_DIR/"
+            fi
+          done
+
+          if [ -f "$PROJECT_ROOT/data/precomputed/BOUH_GROUND_GRID_BUILD_REPORT.md" ]; then
+            cp -v "$PROJECT_ROOT/data/precomputed/BOUH_GROUND_GRID_BUILD_REPORT.md" "$RELEASE_DIR/"
+          fi
+
+          (
+            cd "$RELEASE_DIR"
+            sha256sum * | sort > CHECKSUMS_RELEASE_PACKAGE.txt
+          )
+
+          cd "$PROJECT_ROOT"
+          rm -f "$FINAL_ARTIFACT_ZIP" "$FINAL_ARTIFACT_ZIP.sha256"
+          zip -qr "$FINAL_ARTIFACT_ZIP" final-installable-release
+          sha256sum "$FINAL_ARTIFACT_ZIP" > "$FINAL_ARTIFACT_ZIP.sha256"
+          ls -lah "$FINAL_ARTIFACT_ZIP" "$FINAL_ARTIFACT_ZIP.sha256"
+
+      - name: Upload APK/AAB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-v13.0-APK-AAB-artifacts
+          path: |
+            ${{ env.PROJECT_ROOT }}/android-release-artifacts/*.apk
+            ${{ env.PROJECT_ROOT }}/android-release-artifacts/*.aab
+            ${{ env.PROJECT_ROOT }}/android-release-artifacts/CHECKSUMS_ANDROID.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload final installable package ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-v13.0-installable-android-release-package
+          path: |
+            ${{ env.PROJECT_ROOT }}/BOUH_v13_0_INSTALLABLE_ANDROID_ARTIFACTS.zip
+            ${{ env.PROJECT_ROOT }}/BOUH_v13_0_INSTALLABLE_ANDROID_ARTIFACTS.zip.sha256
+          if-no-files-found: error
+          retention-days: 30

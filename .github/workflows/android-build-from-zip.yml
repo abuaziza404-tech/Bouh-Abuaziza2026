@@ -266,31 +266,38 @@ jobs:
           cd "$PROJECT_ROOT/apps/web"
 
           echo "Working dir: $(pwd)"
-          echo "Original package.json:"
-          cat package.json
+          echo "Node version:"
+          node --version
+          echo "NPM version:"
+          npm --version
 
-          npm install --include=dev --legacy-peer-deps
+          echo "Cleaning broken install state..."
+          rm -rf node_modules
 
-          npm install --include=dev --legacy-peer-deps \
-            react@latest \
-            react-dom@latest \
-            @types/react@latest \
-            @types/react-dom@latest \
-            vite@latest \
-            typescript@latest \
-            @vitejs/plugin-react@latest \
-            vitest@latest \
-            jsdom@latest \
-            @playwright/test@latest \
-            @capacitor/core@latest \
-            @capacitor/cli@latest \
-            @capacitor/android@latest \
-            @capacitor/geolocation@latest \
-            @capacitor/preferences@latest \
-            @capacitor/filesystem@latest \
-            maplibre-gl@latest \
-            lucide-react@latest \
-            pmtiles@latest
+          echo "Installing package dependencies..."
+          npm install --include=dev --legacy-peer-deps --no-audit --no-fund
+
+          echo "Installing exact required build/runtime dependencies..."
+          npm install --include=dev --legacy-peer-deps --no-audit --no-fund \
+            react@18.3.1 \
+            react-dom@18.3.1 \
+            @types/react@18.3.12 \
+            @types/react-dom@18.3.1 \
+            vite@5.4.11 \
+            typescript@5.6.3 \
+            @vitejs/plugin-react@4.3.4 \
+            vitest@2.1.8 \
+            jsdom@25.0.1 \
+            @playwright/test@1.49.1 \
+            @capacitor/core@6.2.0 \
+            @capacitor/cli@6.2.0 \
+            @capacitor/android@6.2.0 \
+            @capacitor/geolocation@6.0.1 \
+            @capacitor/preferences@6.0.3 \
+            @capacitor/filesystem@6.0.3 \
+            maplibre-gl@4.7.1 \
+            lucide-react@0.468.0 \
+            pmtiles@3.1.0
 
           mkdir -p src
 
@@ -300,8 +307,14 @@ jobs:
           /// <reference types="vite/client" />
           EOF
 
+          echo "Verifying local dependencies..."
+          test -f node_modules/vite/bin/vite.js
+          test -d node_modules/react
+          test -d node_modules/react-dom
+          test -d node_modules/@capacitor/core
+
           echo "Installed dependency check:"
-          npm ls react react-dom @types/react @capacitor/core @capacitor/geolocation @capacitor/preferences vitest vite || true
+          npm ls react react-dom @types/react vite @capacitor/core @capacitor/geolocation @capacitor/preferences || true
 
       - name: Build web with Vite only
         shell: bash
@@ -309,28 +322,18 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_ROOT/apps/web"
 
-          echo "Checking vite installation..."
-          npm list vite || true
+          echo "Building with direct local Vite binary..."
+          node ./node_modules/vite/bin/vite.js build
 
-          echo "Force installing vite locally if missing..."
-          npm install --include=dev --legacy-peer-deps vite@latest @vitejs/plugin-react@latest typescript@latest
+          echo "Vite build output:"
+          ls -lah dist || true
 
-          echo "Local node_modules binaries:"
-          ls -lah node_modules/.bin || true
-
-          echo "Build with local Vite binary..."
-          if [ -x "node_modules/.bin/vite" ]; then
-            ./node_modules/.bin/vite build
-          else
-            echo "Local vite binary missing. Trying npm exec..."
-            npm exec --yes vite -- build
-          fi
       - name: Sync Capacitor Android
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT/apps/web"
-          npx cap sync android
+          node ./node_modules/@capacitor/cli/bin/capacitor sync android
 
       - name: Re-enforce Android assets heavy-file policy after Capacitor sync
         shell: bash

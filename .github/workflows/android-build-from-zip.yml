@@ -309,10 +309,22 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_ROOT/apps/web"
 
-          # لا نستخدم npm run build هنا لأنه يشغّل tsc أولًا.
-          # المصدر الحالي فيه أخطاء TypeScript type-only، لكن Vite يستطيع بناء التطبيق.
-          npx vite build
+          echo "Checking vite installation..."
+          npm list vite || true
 
+          echo "Force installing vite locally if missing..."
+          npm install --include=dev --legacy-peer-deps vite@latest @vitejs/plugin-react@latest typescript@latest
+
+          echo "Local node_modules binaries:"
+          ls -lah node_modules/.bin || true
+
+          echo "Build with local Vite binary..."
+          if [ -x "node_modules/.bin/vite" ]; then
+            ./node_modules/.bin/vite build
+          else
+            echo "Local vite binary missing. Trying npm exec..."
+            npm exec --yes vite -- build
+          fi
       - name: Sync Capacitor Android
         shell: bash
         run: |
